@@ -2,13 +2,18 @@ train_transform:
   augments:
     - __target__: sample
       num_samples: 32768
-      num_vertex_samples: 1024
+      num_vertex_samples: 2048
+      edge_weight: 1.0
     
     - __target__: normalize_pc
     
     - __target__: add_noise
-      noise_std_min: 0.005
-      noise_std_max: 0.020
+      noise_std_min: 0.003
+      noise_std_max: 0.025
+      noise_types: [laplace, gaussian, uniform, impulse]
+      noise_probs: [0.45, 0.35, 0.15, 0.05]
+      uniform_ratio: 2.0
+      impulse_prob: 0.02
     
     - __target__: linear
       scale: [0.8, 1.2]
@@ -20,24 +25,37 @@ train_transform:
     
     - __target__: patch
       patch_size: 1000
-      num_patches: 1
+      num_patches: 2
       train_cvm_network: False
+      scales: [1.0, 1.5, 2.0]
+      scale_probs: [0.5, 0.3, 0.2]
+      seed_strategy: farthest
 
 validate_transform: &validate_transform
   augments:
     - __target__: sample
       num_samples: 32768
-      num_vertex_samples: 1024
+      num_vertex_samples: 2048
+      edge_weight: 1.0
     
     - __target__: normalize_pc
     
     - __target__: add_noise
-      noise_std_min: 0.005
-      noise_std_max: 0.020
+      noise_std_min: 0.003
+      noise_std_max: 0.025
+      noise_types: [laplace, gaussian, uniform, impulse]
+      noise_probs: [0.45, 0.35, 0.15, 0.05]
+      uniform_ratio: 2.0
+      impulse_prob: 0.02
     
     - __target__: patch
       patch_size: 1000
-      num_patches: 1
+      num_patches: 2
       train_cvm_network: False
+      scales: [1.0, 1.5, 2.0]
+      scale_probs: [0.5, 0.3, 0.2]
+      seed_strategy: farthest
 
-predict_transform: *validate_transform
+predict_transform:
+  augments:
+    - __target__: normalize_pc

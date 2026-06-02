@@ -1,5 +1,5 @@
 from numpy import ndarray
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 
 import numpy as np
 
@@ -24,6 +24,7 @@ def sample_surface(
     mask: Optional[ndarray]=None,
     face_index: Optional[ndarray]=None,
     random_lengths: Optional[ndarray]=None,
+    face_weight: Optional[ndarray]=None,
 ) -> Tuple[ndarray, ndarray, ndarray, ndarray]:
     '''
     Randomly pick samples proportional to face area.
@@ -46,12 +47,17 @@ def sample_surface(
     if mask is not None:
         original_face_indices = original_face_indices[mask]
         faces = faces[mask]
+        if face_weight is not None:
+            face_weight = face_weight[mask]
     if face_index is None:
         # get face area
         offset_0 = vertices[faces[:, 1]] - vertices[faces[:, 0]]
         offset_1 = vertices[faces[:, 2]] - vertices[faces[:, 0]]
-        face_weight = np.linalg.norm(np.cross(offset_0, offset_1, axis=-1), axis=-1)
-        
+        area_weight = np.linalg.norm(np.cross(offset_0, offset_1, axis=-1), axis=-1)
+        if face_weight is None:
+            face_weight = area_weight
+        else:
+            face_weight = face_weight * area_weight
         weight_cum = np.cumsum(face_weight, axis=0)
         face_pick = np.random.rand(num_samples) * weight_cum[-1]
         _face_index = np.searchsorted(weight_cum, face_pick)
@@ -81,6 +87,46 @@ def sample_surface(
     vertex_samples = sample_vector + tri_origins
     return vertex_samples, original_face_index, _face_index, random_lengths
 
+def compute_face_normals(vertices: ndarray, faces: ndarray) -> ndarray:
+    v0 = vertices[faces[:, 0]]
+    v1 = vertices[faces[:, 1]]
+    v2 = vertices[faces[:, 2]]
+    normals = np.cross(v1 - v0, v2 - v0)
+    norm = np.linalg.norm(normals, axis=-1, keepdims=True) + 1e-12
+    return normals / norm
+
+def compute_vertex_normals(vertices: ndarray, faces: ndarray, face_normals: ndarray) -> ndarray:
+    normals = np.zeros_like(vertices)
+    for i, face in enumerate(faces):
+        normals[face] += face_normals[i]
+    norm = np.linalg.norm(normals, axis=-1, keepdims=True) + 1e-12
+    return normals / norm
+
+def compute_face_sharpness(vertices: ndarray, faces: ndarray, face_normals: Optional[ndarray]=None) -> ndarray:
+    if face_normals is None:
+        face_normals = compute_face_normals(vertices, faces)
+    edge_to_faces: Dict[Tuple[int, int], List[int]] = {}
+    for fi, face in enumerate(faces):
+        edges = [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
+        for a, b in edges:
+            key = (a, b) if a < b else (b, a)
+            edge_to_faces.setdefault(key, []).append(fi)
+    sharpness = np.zeros((faces.shape[0],), dtype=np.float32)
+    for fids in edge_to_faces.values():
+        if len(fids) < 2:
+            continue
+        n0 = face_normals[fids[0]]
+        for fid in fids[1:]:
+            n1 = face_normals[fid]
+            cos = np.clip(np.dot(n0, n1), -1.0, 1.0)
+            angle = np.arccos(cos)
+            sharpness[fids[0]] = max(sharpness[fids[0]], angle)
+            sharpness[fid] = max(sharpness[fid], angle)
+    max_val = sharpness.max()
+    if max_val > 1e-8:
+        sharpness = sharpness / max_val
+    return sharpness
+
 def sample_barycentric(
     vertex_group: ndarray,
     faces: ndarray,
@@ -104,6 +150,7 @@ def sample_vertex_groups(
     face_normals: Optional[ndarray]=None,
     vertex_groups: Optional[ndarray]=None,
     face_mask: Optional[ndarray]=None,
+    face_weight: Optional[ndarray]=None,
     deterministic_params: Optional[Dict[str, ndarray]]=None,
 ) -> Tuple[ndarray, Optional[ndarray], Optional[ndarray], Dict[str, ndarray]]:
     """
@@ -177,6 +224,7 @@ def sample_vertex_groups(
                 mask=_mask,
                 face_index=face_index,
                 random_lengths=random_lengths,
+                face_weight=face_weight,
             )
         else:
             if face_mask is not None:
@@ -193,6 +241,7 @@ def sample_vertex_groups(
                 vertices=vertices,
                 faces=faces,
                 mask=_mask,
+                face_weight=face_weight,
             )
         
         sampled_vertices = np.concatenate([vertices[perm], face_vertices], axis=0)
@@ -223,6 +272,7 @@ def sample_vertex_groups(
                 mask=face_mask,
                 face_index=face_index,
                 random_lengths=random_lengths,
+                face_weight=face_weight,
             )
         else:
             if face_mask is not None:
@@ -236,6 +286,7 @@ def sample_vertex_groups(
                 vertices=vertices,
                 faces=faces,
                 mask=face_mask,
+                face_weight=face_weight,
             )
         n_vertex = vertices[perm]
         sampled_vertices = np.concatenate([n_vertex, face_vertices], axis=0)
