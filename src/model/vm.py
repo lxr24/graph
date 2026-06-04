@@ -14,6 +14,41 @@ def get_random_indices(n, m):
     idx = np.random.permutation(n)[:m]
     return jt.array(idx).int32()
 
+def gather_neighbors(x, idx):
+    """
+    x: (B, N, C)
+    idx: (B, N, K)
+    return: (B, N, K, C)
+    """
+    B = x.shape[0]
+    out = []
+    for b in range(B):
+        out.append(x[b][idx[b]])
+    return jt.stack(out, dim=0)
+
+def chamfer_distance(pcl_a, pcl_b):
+    dist_ab, _ = jt.misc.knn(pcl_a, pcl_b, 1)
+    dist_ba, _ = jt.misc.knn(pcl_b, pcl_a, 1)
+    return dist_ab.mean() + dist_ba.mean()
+
+def point_to_plane_distance(pcl_pred, pcl_clean, normals):
+    diff = pcl_pred - pcl_clean
+    proj = (diff * normals).sum(dim=-1)
+    return (proj ** 2).mean()
+
+def structure_loss(pcl_pred, pcl_clean, k=8):
+    if k <= 0:
+        return jt.array(0.0)
+    if k >= pcl_clean.shape[1]:
+        k = int(pcl_clean.shape[1] - 1)
+    _, nn_idx = jt.misc.knn(pcl_clean, pcl_clean, k + 1)
+    nn_idx = nn_idx[:, :, 1:]
+    clean_nn = gather_neighbors(pcl_clean, nn_idx)
+    pred_nn = gather_neighbors(pcl_pred, nn_idx)
+    rel_clean = clean_nn - pcl_clean.unsqueeze(2)
+    rel_pred = pred_nn - pcl_pred.unsqueeze(2)
+    return ((rel_pred - rel_clean) ** 2).sum(dim=-1).mean()
+
 class VelocityModule(ModelSpec):
     
     def __init__(self, model_config, transform_config):
@@ -23,15 +58,38 @@ class VelocityModule(ModelSpec):
         # geometry
         self.frame_knn = cfg['frame_knn']
         self.num_train_points = cfg['num_train_points']
+        self.structure_k = cfg.get('structure_k', 8)
         
         # score-matching
         self.dsm_sigma = cfg['dsm_sigma']
+
+        # predict config
+        self.predict_num_steps = cfg.get('predict_num_steps', 2)
+        self.predict_step_size = cfg.get('predict_step_size', 1.0)
+        self.predict_step_schedule = cfg.get('predict_step_schedule', 'linear')
+        self.predict_adaptive_step = cfg.get('predict_adaptive_step', True)
+        self.predict_iterations = cfg.get('predict_iterations', 1)
+        self.predict_postprocess = cfg.get('predict_postprocess', False)
+        self.predict_patch_size = cfg.get('predict_patch_size', 1000)
+        self.predict_seed_k = cfg.get('predict_seed_k', 6)
+        self.predict_seed_k_alpha = cfg.get('predict_seed_k_alpha', 1)
+        self.postprocess_k = cfg.get('postprocess_k', 16)
+        self.postprocess_strength = cfg.get('postprocess_strength', 0.1)
+        self.postprocess_sigma = cfg.get('postprocess_sigma', 0.05)
+        self.use_chamfer = cfg.get('use_chamfer', True)
+        self.use_p2plane = cfg.get('use_p2plane', True)
+        self.use_structure = cfg.get('use_structure', True)
         
         # networks
         self.encoder = FeatureExtraction(
             k=self.frame_knn,
             input_dim=3,
-            embedding_dim=cfg['feat_embedding_dim']
+            embedding_dim=cfg['feat_embedding_dim'],
+            num_layers=cfg.get('edge_conv_layers', 3),
+            use_residual=cfg.get('use_residual', True),
+            use_attention=cfg.get('use_attention', False),
+            attention_heads=cfg.get('attention_heads', 4),
+            use_global=cfg.get('use_global', False),
         )
         
         self.decoder = Decoder(
@@ -41,7 +99,7 @@ class VelocityModule(ModelSpec):
             hidden_size=cfg['decoder_hidden_dim'],
         )
     
-    def get_supervised_loss(self, pc_noisy, pc_mix, pc_clean):
+    def get_supervised_loss(self, pc_noisy, pc_mix, pc_clean, pc_normals=None):
         """
         pcl_noisy: (B, N, 3)
         pcl_clean: (B, N, 3)
@@ -59,6 +117,8 @@ class VelocityModule(ModelSpec):
         pc_noisy = pc_noisy[:, pnt_idx, :]
         pc_mix = pc_mix[:, pnt_idx, :]
         pc_clean = pc_clean[:, pnt_idx, :]
+        if pc_normals is not None:
+            pc_normals = pc_normals[:, pnt_idx, :]
         
         # target
         grad_dir_t_target = pc_clean - pc_noisy
@@ -69,10 +129,24 @@ class VelocityModule(ModelSpec):
         ).reshape(B, len(pnt_idx), d) # type: ignore
         
         loss = (((pred_dir - grad_dir_t_target) ** 2.0) / self.dsm_sigma).sum(dim=-1).mean()
-        
-        return loss
+        losses = {"loss": loss}
+        pred_points = pc_noisy + pred_dir
+        if self.use_chamfer:
+            losses["chamfer"] = chamfer_distance(pred_points, pc_clean)
+        if self.use_p2plane and pc_normals is not None:
+            losses["p2plane"] = point_to_plane_distance(pred_points, pc_clean, pc_normals)
+        if self.use_structure:
+            losses["structure"] = structure_loss(pred_points, pc_clean, k=self.structure_k)
+        return losses
 
-    def denoise_langevin_dynamics(self, pcl_noisy, num_steps: int=4):
+    def denoise_langevin_dynamics(
+        self,
+        pcl_noisy,
+        num_steps: int=4,
+        step_size: float=1.0,
+        step_schedule: str="linear",
+        adaptive_step: bool=True,
+    ):
         """
         pcl_noisy: (B, N, 3)
         """
@@ -86,8 +160,16 @@ class VelocityModule(ModelSpec):
                 pred_dir = self.decoder(
                     c=feat.reshape(-1, F_dim)
                 ).reshape(B, N, d)
-                
-                pcl_next = pcl_next + (1.0 / num_steps) * pred_dir
+                if step_schedule == "cosine":
+                    step = step_size * 0.5 * (1 + jt.cos(jt.array(it / max(1, num_steps - 1)) * np.pi))
+                elif step_schedule == "linear":
+                    step = step_size * (1.0 - it / max(1, num_steps))
+                else:
+                    step = step_size
+                if adaptive_step:
+                    scale = jt.sqrt((pred_dir ** 2).sum(dim=-1, keepdims=True))
+                    step = step * jt.tanh(scale) / (scale + 1e-6)
+                pcl_next = pcl_next + step * pred_dir
         return pcl_next, None
     
     def training_step(self, batch: Dict) -> Dict:
@@ -95,12 +177,16 @@ class VelocityModule(ModelSpec):
         pc_noisy = batch['pc_noisy'].reshape(-1, patch_size, 3)
         pc_mix = batch['pc_mix'].reshape(-1, patch_size, 3)
         pc_clean = batch['pc_clean'].reshape(-1, patch_size, 3)
+        pc_normals = batch.get('pc_normals', None)
+        if pc_normals is not None:
+            pc_normals = pc_normals.reshape(-1, patch_size, 3)
         loss = self.get_supervised_loss(
             pc_noisy=pc_noisy,
             pc_mix=pc_mix,
             pc_clean=pc_clean,
+            pc_normals=pc_normals,
         )
-        return {"loss": loss}
+        return loss
     
     def execute(self, **kwargs) -> Dict: # type: ignore
         return self.training_step(**kwargs)
@@ -110,18 +196,31 @@ class VelocityModule(ModelSpec):
         pc_noisy_batch = batch['pc_noisy']
         assert pc_noisy_batch.ndim == 3
         
-        num_steps = 1
         res = []
         for i, pc_noisy in enumerate(pc_noisy_batch):
             pc_next = pc_noisy
-            for it in range(num_steps):
+            for it in range(self.predict_iterations):
                 pc_next = patch_based_denoise(
                     model=self,
                     pcl_noisy=pc_next,
-                    patch_size=1000,
-                    seed_k=6,
-                    seed_k_alpha=1,
+                    patch_size=self.predict_patch_size,
+                    seed_k=self.predict_seed_k,
+                    seed_k_alpha=self.predict_seed_k_alpha,
+                    num_steps=self.predict_num_steps,
+                    step_size=self.predict_step_size,
+                    step_schedule=self.predict_step_schedule,
+                    adaptive_step=self.predict_adaptive_step,
                 )
+                if pc_next is None:
+                    pc_next = pc_noisy
+                    break
+                if self.predict_postprocess:
+                    pc_next = edge_aware_smooth(
+                        pc_next,
+                        k=self.postprocess_k,
+                        strength=self.postprocess_strength,
+                        sigma=self.postprocess_sigma,
+                    )
             pc_denoised = pc_next.detach().numpy()
             res.append({"pc_denoised": pc_denoised})
         return res
@@ -131,11 +230,14 @@ class VelocityModule(ModelSpec):
         for b in batch:
             if not self.is_predict():
                 assert b.meta is not None
-                res.append({
+                entry = {
                     "pc_noisy": b.meta['pc_noisy'], # (num_patches, patch_size, 3)
                     "pc_clean": b.meta['pc_clean'],
                     "pc_mix": b.meta['pc_mix'],
-                })
+                }
+                if 'pc_normals' in b.meta:
+                    entry["pc_normals"] = b.meta['pc_normals']
+                res.append(entry)
             else:
                 d = {
                     "pc_noisy": b.sampled_vertices_noisy, # (N, 3)
@@ -192,7 +294,17 @@ def knn_points(x, y, k):
     nn = jt.stack(nn, dim=0)
     return dist_k, idx, nn
 
-def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_k=6, seed_k_alpha=1) -> jt.Var:
+def patch_based_denoise(
+    model: VelocityModule,
+    pcl_noisy,
+    patch_size=1000,
+    seed_k=6,
+    seed_k_alpha=1,
+    num_steps: int=2,
+    step_size: float=1.0,
+    step_schedule: str="linear",
+    adaptive_step: bool=True,
+) -> jt.Var:
     """
     pcl_noisy: (N, 3)
     """
@@ -232,7 +344,13 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     while i < num_patches:
         curr = patches[i:i+patch_step]
         try:
-            out, _ = model.denoise_langevin_dynamics(curr)
+            out, _ = model.denoise_langevin_dynamics(
+                curr,
+                num_steps=num_steps,
+                step_size=step_size,
+                step_schedule=step_schedule,
+                adaptive_step=adaptive_step,
+            )
         except Exception as e:
             print("Denoise error:", e)
             return None
@@ -248,3 +366,21 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
         pcl_out.append(patches_denoised[patch_id][mask])
     pcl_out = jt.concat(pcl_out, dim=0)
     return pcl_out
+
+def edge_aware_smooth(pcl, k=16, strength=0.1, sigma=0.05):
+    """
+    pcl: (N, 3)
+    """
+    if k <= 0:
+        return pcl
+    if pcl.shape[0] < k:
+        k = pcl.shape[0]
+    pcl = pcl.unsqueeze(0)  # (1, N, 3)
+    _, _, nn = knn_points(pcl, pcl, k)
+    nn = nn.squeeze(0)  # (N, k, 3)
+    pcl = pcl.squeeze(0)
+    dist = ((nn - pcl.unsqueeze(1)) ** 2).sum(dim=-1)
+    weights = jt.exp(-dist / (sigma ** 2 + 1e-8))
+    weights = weights / (weights.sum(dim=1, keepdims=True) + 1e-8)
+    avg = (weights.unsqueeze(-1) * nn).sum(dim=1)
+    return pcl + strength * (avg - pcl)

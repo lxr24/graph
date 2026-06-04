@@ -3,6 +3,28 @@ from jittor import nn
 
 import jittor as jt
 
+class SelfAttention(nn.Module):
+    def __init__(self, dim, num_heads=4):
+        super().__init__()
+        assert dim % num_heads == 0, "dim must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.proj = nn.Linear(dim, dim)
+    
+    def execute(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
+        q = qkv[:, :, 0].transpose(1, 2)  # (B, H, N, D)
+        k = qkv[:, :, 1].transpose(1, 2)
+        v = qkv[:, :, 2].transpose(1, 2)
+        attn = jt.matmul(q, k.transpose(2, 3)) * self.scale
+        attn = jt.nn.softmax(attn, dim=-1)
+        out = jt.matmul(attn, v).transpose(1, 2).reshape(B, N, C)
+        out = self.proj(out)
+        return out
+
 class EdgeConv(nn.Module):
     def __init__(self, in_channels, out_channels, activation: Optional[str]='ReLU'):
         super().__init__()
@@ -63,21 +85,42 @@ class DynamicEdgeConv(EdgeConv):
         return super().execute(x, edge_index)
 
 class FeatureExtraction(nn.Module):
-    def __init__(self, k=32, input_dim=0, embedding_dim=512, distance_estimation=False):
+    def __init__(
+        self,
+        k=32,
+        input_dim=0,
+        embedding_dim=512,
+        distance_estimation=False,
+        num_layers=3,
+        use_residual=True,
+        use_attention=False,
+        attention_heads=4,
+        use_global=False,
+    ):
         super().__init__()
 
         self.k = k
         self.input_dim = input_dim
         self.embedding_dim = embedding_dim
         self.distance_estimation = distance_estimation
-
-        self.conv1 = DynamicEdgeConv(self.input_dim, embedding_dim // 8)
-        self.conv2 = DynamicEdgeConv(embedding_dim // 8, embedding_dim // 4)
-        self.conv3 = DynamicEdgeConv(
-            embedding_dim // 8 + embedding_dim // 4,
-            embedding_dim,
-            activation=None
-        )
+        self.num_layers = num_layers
+        self.use_residual = use_residual
+        self.use_attention = use_attention
+        self.use_global = use_global
+        
+        hidden_dims = [embedding_dim // 8, embedding_dim // 4, embedding_dim // 2, embedding_dim]
+        hidden_dims = hidden_dims[:max(1, num_layers)]
+        self.convs = nn.ModuleList()
+        in_dim = self.input_dim
+        for i, out_dim in enumerate(hidden_dims):
+            activation = None if i == len(hidden_dims) - 1 else 'ReLU'
+            self.convs.append(DynamicEdgeConv(in_dim, out_dim, activation=activation))
+            in_dim = out_dim
+        self.fuse = nn.Linear(sum(hidden_dims), embedding_dim)
+        if self.use_global:
+            self.global_proj = nn.Linear(embedding_dim * 3, embedding_dim)
+        if self.use_attention:
+            self.attention = SelfAttention(embedding_dim, num_heads=attention_heads)
 
     # ========= edge_index 构建 =========
     def get_edge_index(self, x):
@@ -113,30 +156,26 @@ class FeatureExtraction(nn.Module):
         if self.distance_estimation:
             x = self.normalize_patch(x)
         
-        # -------- conv1 --------
-        edge_index = self.get_edge_index(x)
-        x_flat = x.reshape(B * N, -1)
-        
-        x1 = self.conv1(x_flat, edge_index)
-        x1 = x1.reshape(B, N, -1)
-        
-        # -------- conv2 --------
-        edge_index = self.get_edge_index(x1)
-        x1_flat = x1.reshape(B * N, -1)
-        
-        x2 = self.conv2(x1_flat, edge_index)
-        x2 = x2.reshape(B, N, -1)
-        
-        # -------- conv3 --------
-        edge_index = self.get_edge_index(x2)
-        
-        x_combined = jt.concat([x1, x2], dim=-1)
-        x_combined_flat = x_combined.reshape(B * N, -1) # type: ignore
-        
-        x3 = self.conv3(x_combined_flat, edge_index)
-        x3 = x3.reshape(B, N, -1)
-        
-        return x3
+        features = []
+        x_in = x
+        for conv in self.convs:
+            edge_index = self.get_edge_index(x_in)
+            x_flat = x_in.reshape(B * N, -1)
+            x_out = conv(x_flat, edge_index)
+            x_out = x_out.reshape(B, N, -1)
+            if self.use_residual and x_out.shape[-1] == x_in.shape[-1]:
+                x_out = x_out + x_in
+            features.append(x_out)
+            x_in = x_out
+        x_cat = jt.concat(features, dim=-1)
+        x_fused = self.fuse(x_cat.reshape(B * N, -1)).reshape(B, N, -1)
+        if self.use_global:
+            global_feat = jt.concat([jt.max(x_fused, dim=1), jt.mean(x_fused, dim=1)], dim=-1)
+            global_feat = global_feat.unsqueeze(1).broadcast((B, N, global_feat.shape[-1]))
+            x_fused = self.global_proj(jt.concat([x_fused, global_feat], dim=-1))
+        if self.use_attention:
+            x_fused = x_fused + self.attention(x_fused)
+        return x_fused
 
 class Decoder(nn.Module):
     
