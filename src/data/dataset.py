@@ -224,7 +224,7 @@ class PCDataset(Dataset):
                     if all(isinstance(x, ndarray) for x in values):
                         try:
                             tensors_cat[k1] = jt.array(np.concatenate(values, axis=1))
-                        except Exception:
+                        except (ValueError, TypeError):
                             cat_vals = [jt.array(x) for x in values]
                             tensors_cat[k1] = jt.concat(cat_vals, dim=1)
                     else:
@@ -252,7 +252,7 @@ class PCDataset(Dataset):
                 if all(isinstance(x, ndarray) for x in values):
                     try:
                         tensors_stack[k] = jt.array(np.stack(values, axis=0))
-                    except Exception:
+                    except (ValueError, TypeError):
                         tensors_stack[k] = jt.stack([jt.array(x) for x in values])
                 else:
                     stack_vals = []
