@@ -97,34 +97,54 @@ def compute_face_normals(vertices: ndarray, faces: ndarray) -> ndarray:
 
 def compute_vertex_normals(vertices: ndarray, faces: ndarray, face_normals: ndarray) -> ndarray:
     normals = np.zeros_like(vertices)
-    for i, face in enumerate(faces):
-        normals[face] += face_normals[i]
+    
+    # 使用 np.add.at 进行向量化累加，消灭 Python 层面的 for 循环
+    np.add.at(normals, faces[:, 0], face_normals)
+    np.add.at(normals, faces[:, 1], face_normals)
+    np.add.at(normals, faces[:, 2], face_normals)
+    
     norm = np.linalg.norm(normals, axis=-1, keepdims=True) + 1e-12
     return normals / norm
 
 def compute_face_sharpness(vertices: ndarray, faces: ndarray, face_normals: Optional[ndarray]=None) -> ndarray:
     if face_normals is None:
         face_normals = compute_face_normals(vertices, faces)
-    edge_to_faces: Dict[Tuple[int, int], List[int]] = {}
-    for fi, face in enumerate(faces):
-        edges = [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
-        for a, b in edges:
-            key = (a, b) if a < b else (b, a)
-            edge_to_faces.setdefault(key, []).append(fi)
-    sharpness = np.zeros((faces.shape[0],), dtype=np.float32)
-    for fids in edge_to_faces.values():
-        if len(fids) < 2:
-            continue
-        n0 = face_normals[fids[0]]
-        for fid in fids[1:]:
-            n1 = face_normals[fid]
-            cos = np.clip(np.dot(n0, n1), -1.0, 1.0)
-            angle = np.arccos(cos)
-            sharpness[fids[0]] = max(sharpness[fids[0]], angle)
-            sharpness[fid] = max(sharpness[fid], angle)
+        
+    # 1. 提取所有的边 (3F, 2) 并排序使 (a,b) 等价于 (b,a)
+    edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    edges.sort(axis=1)
+    
+    # 2. 记录每条边对应的面索引
+    face_indices = np.repeat(np.arange(len(faces)), 3)
+    
+    # 3. 对边进行字典序排序，使相同的边排列在一起
+    order = np.lexsort((edges[:, 1], edges[:, 0]))
+    sorted_edges = edges[order]
+    sorted_face_indices = face_indices[order]
+    
+    # 4. 寻找相邻面（在流形网格中，相邻面共享同一条边）
+    is_pair = np.all(sorted_edges[:-1] == sorted_edges[1:], axis=1)
+    pair_idx1 = np.where(is_pair)[0]
+    pair_idx2 = pair_idx1 + 1
+    
+    f1 = sorted_face_indices[pair_idx1]
+    f2 = sorted_face_indices[pair_idx2]
+    
+    # 5. 批量计算相邻面的法线夹角
+    n1 = face_normals[f1]
+    n2 = face_normals[f2]
+    cos_theta = np.clip(np.sum(n1 * n2, axis=1), -1.0, 1.0)
+    angles = np.arccos(cos_theta)
+    
+    # 6. 将最大夹角更新回 sharpness 数组
+    sharpness = np.zeros(len(faces), dtype=np.float32)
+    np.maximum.at(sharpness, f1, angles)
+    np.maximum.at(sharpness, f2, angles)
+    
     max_val = sharpness.max()
     if max_val > 1e-8:
         sharpness = sharpness / max_val
+        
     return sharpness
 
 def sample_barycentric(

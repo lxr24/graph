@@ -1,10 +1,13 @@
-data_name: &data_name models/model_normalized.obj
-loader: &loader obj
+# 1. 指向我们在 preprocess.py 中生成的二进制压缩文件
+data_name: &data_name models/pre_sampled_100k.npz
+
+# 2. 切换为我们刚才在 dataset.py 中新增的极速加载器
+loader: &loader npz
 
 train_dataset:
   shuffle: True
   batch_size: 16
-  num_workers: 8
+  num_workers: 8  # 保持 8 个 worker，现在它们只会飞速地把 npz 搬进内存
   datapath:
     input_dataset_dir: ./dataset_train
     use_prob: True

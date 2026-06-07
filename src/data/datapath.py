@@ -11,6 +11,9 @@ import trimesh
 from .asset import Asset
 from .spec import ConfigSpec
 
+
+
+
 @dataclass
 class LazyAsset(ABC):
     """store datapath and load upon requiring"""
@@ -49,6 +52,20 @@ class NpyLazyAsset(LazyAsset):
             sampled_vertices_noisy=pc,
         )
         return asset
+
+@dataclass
+class PreSampledLazyAsset(LazyAsset):
+    def load(self) -> 'Asset':
+        # 极速读取二进制文件
+        data = np.load(self.path)
+        asset = Asset(
+            path=self.path,
+            cls=self.cls,
+            sampled_vertices=data['vertices'],
+            sampled_normals=data['normals']
+        )
+        return asset
+# ----------------------------------
 
 @dataclass
 class Datapath(ConfigSpec):
@@ -93,6 +110,7 @@ class Datapath(ConfigSpec):
             None: ObjLazyAsset,
             'obj': ObjLazyAsset,
             'npy': NpyLazyAsset,
+            'npz': PreSampledLazyAsset,
         }
         input_dataset_dir = kwargs.get('input_dataset_dir', '')
         num_files = kwargs.get('num_files', None)

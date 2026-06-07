@@ -14,7 +14,6 @@ from .datapath import Datapath, LazyAsset
 from .spec import ConfigSpec
 from .transform import Transform
 
-
 @dataclass
 class DatasetConfig(ConfigSpec):
     shuffle: bool

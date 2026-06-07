@@ -42,26 +42,18 @@ class AugmentSample(Augment):
         cls.check_keys(kwargs)
         return AugmentSample(**kwargs)
     
+    # 在 src/data/augment.py 中修改 AugmentSample 的 apply 方法
+
     def apply(self, asset: Asset, **kwargs):
-        assert asset.vertices is not None
-        assert asset.faces is not None
-        face_normals = compute_face_normals(asset.vertices, asset.faces)
-        vertex_normals = compute_vertex_normals(asset.vertices, asset.faces, face_normals)
-        face_weight = None
-        if self.edge_weight > 0:
-            sharpness = compute_face_sharpness(asset.vertices, asset.faces, face_normals)
-            face_weight = 1.0 + self.edge_weight * sharpness
-        sampled_vertices, sampled_normals, sampled_vertex_groups, hidden_states = sample_vertex_groups(
-            vertices=asset.vertices,
-            faces=asset.faces,
-            num_samples=self.num_samples,
-            num_vertex_samples=self.num_vertex_samples,
-            vertex_normals=vertex_normals,
-            face_normals=face_normals,
-            face_weight=face_weight,
-        )
-        asset.sampled_vertices = sampled_vertices
-        asset.sampled_normals = sampled_normals
+        assert asset.sampled_vertices is not None, "Please use PreSampledLazyAsset!"
+        
+        # O(1) 级别的极速随机采样
+        total_points = asset.sampled_vertices.shape[0]
+        idx = np.random.choice(total_points, self.num_samples, replace=False)
+        
+        asset.sampled_vertices = asset.sampled_vertices[idx]
+        if asset.sampled_normals is not None:
+            asset.sampled_normals = asset.sampled_normals[idx]
 
 @dataclass(frozen=True)
 class AugmentNormalizePC(Augment):
