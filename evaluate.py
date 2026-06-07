@@ -199,6 +199,13 @@ def find_meshes(mesh_dir, data_name='models/model_normalized.obj'):
     return meshes
 
 
+def _preview_keys(samples, n=3):
+    keys = sorted(samples.keys())
+    if not keys:
+        return []
+    return keys[:n]
+
+
 # ======================== 单样本评测（用于并行） ========================
 
 def evaluate_single(args_tuple):
@@ -268,11 +275,17 @@ def main():
     if not common_keys:
         print("错误：未找到匹配的测试样本。")
         print(f"  pred_dir: {len(pred_samples)} 个, gt_dir: {len(gt_samples)} 个, noisy_dir: {len(noisy_samples)} 个")
+        print(f"  pred 示例: {_preview_keys(pred_samples)}")
+        print(f"  gt 示例:   {_preview_keys(gt_samples)}")
+        print(f"  noisy 示例: {_preview_keys(noisy_samples)}")
+        print("  请检查 --pred_dir 是否正好指向包含 shapenet/.../denoised.npy 的那一层目录。")
         sys.exit(1)
 
     missing_pred = set(gt_samples.keys()) - set(pred_samples.keys())
     if missing_pred:
         print(f"警告：{len(missing_pred)} 个测试样本缺少预测结果，将记为 0 分。")
+        preview_missing = sorted(missing_pred)[:5]
+        print(f"  缺失样本示例: {preview_missing}")
 
     # 构建任务列表
     tasks = []

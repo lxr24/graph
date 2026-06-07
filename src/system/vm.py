@@ -15,7 +15,6 @@ class VMWriter(DummyWriter):
         self.output_format = output_format
     
     def write(self, batch, prediction: List[Dict], dataset_module=None):
-        pc_noisy_batch = batch.get('pc_noisy', None)
         for i, asset in enumerate(batch['asset']):
             path = asset.path
             assert path is not None, "asset path is None"
@@ -28,19 +27,6 @@ class VMWriter(DummyWriter):
             else:
                 denoised_np = denoised.numpy()
                 
-            # --- 强制对齐补丁 开始 ---
-            target_num = 50000
-            current_num = denoised_np.shape[0]
-            
-            if current_num < target_num:
-                # 缺少的点：把最后一个点复制几份补齐（距离原点近，不影响 Chamfer 距离评测）
-                pad_points = np.repeat(denoised_np[-1:], target_num - current_num, axis=0)
-                denoised_np = np.concatenate([denoised_np, pad_points], axis=0)
-            elif current_num > target_num:
-                # 多出的点：直接截断
-                denoised_np = denoised_np[:target_num]
-            # --- 强制对齐补丁 结束 ---
-
             if self.output_format == 'npy':
                 np.save(os.path.join(dirname, f"{self.save_name}.npy"), denoised_np.astype(np.float32))
             else:

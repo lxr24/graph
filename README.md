@@ -41,11 +41,12 @@ OMP_NUM_THREADS=1 python run.py --task configs/task/train_vm.yaml
 - 训练策略：学习率调度、梯度累积/裁剪、EMA（可在配置中调节）。
 
 ## 推理（生成提交文件）
-修改 `configs/task/predict_vm.yaml` 中的 `load_ckpt` 为你的最佳权重路径，然后运行：
+修改 `configs/task/predict_vm.yaml` 中的 `load_ckpt` 为你在验证集上最优的权重路径，然后运行：
 ```bash
 python run.py --task configs/task/predict_vm.yaml
 ```
 降噪结果保存在 `results/` 目录下，格式为 `.npy` (float32, shape (N,3))。
+建议先在验证集比较多个 checkpoint，再将最佳 checkpoint 用于 `predict_vm.yaml`。
 
 ## 验证集评估（便于超参搜索）
 将 `configs/task/train_vm.yaml` 中的 `mode` 改为 `validate`，然后运行：
@@ -78,3 +79,4 @@ python evaluate.py \
     --mesh_dir ./dataset_train \
     --workers 8
 ```
+注意：`--pred_dir` 必须指向包含 `shapenet/<synset_id>/<model_id>/denoised.npy` 的目录层级，否则会出现“缺失预测记为 0 分”。
