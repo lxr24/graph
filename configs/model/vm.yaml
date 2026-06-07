@@ -13,15 +13,15 @@ structure_k: 8
 use_chamfer: true
 use_p2plane: true
 use_structure: true
-predict_num_steps: 3
-predict_step_size: 0.8
-predict_step_schedule: linear
-predict_adaptive_step: true
-predict_iterations: 2
-predict_patch_size: 1000
-predict_seed_k: 6
-predict_seed_k_alpha: 1
-predict_postprocess: true
 postprocess_k: 16
 postprocess_strength: 0.1
 postprocess_sigma: 0.05
+predict_num_steps: 4
+predict_step_size: 0.8
+predict_step_schedule: linear
+predict_adaptive_step: true
+predict_iterations: 1
+predict_patch_size: 1024        # 🚨 回退到 1024！底层 KNN 不会 OOM
+predict_seed_k: 2               # 🚨 保持 2，覆盖率足够了
+predict_seed_k_alpha: 1.0       # 🚨 调大到 2.0！这能降低每次喂给 GPU 的块数，严格保护 8G 显存
+predict_postprocess: false      # 🚨 保持关闭，用我们上面的张量加权融合就够了

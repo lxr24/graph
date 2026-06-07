@@ -28,7 +28,8 @@ pip install jittor numpy trimesh scipy omegaconf point-cloud-utils
 
 ## 训练
 ```bash
-python run.py --task configs/task/train_vm.yaml
+python preprocess.py
+OMP_NUM_THREADS=1 python run.py --task configs/task/train_vm.yaml
 ```
 训练权重保存在 `experiments/` 目录下。
 
@@ -42,8 +43,7 @@ python run.py --task configs/task/train_vm.yaml
 ## 推理（生成提交文件）
 修改 `configs/task/predict_vm.yaml` 中的 `load_ckpt` 为你的最佳权重路径，然后运行：
 ```bash
-python preprocess.py
-OMP_NUM_THREADS=1 python run.py --task configs/task/predict_vm.yaml
+python run.py --task configs/task/predict_vm.yaml
 ```
 降噪结果保存在 `results/` 目录下，格式为 `.npy` (float32, shape (N,3))。
 

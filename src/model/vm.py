@@ -195,15 +195,14 @@ class VelocityModule(ModelSpec):
         pc_noisy_batch = batch['pc_noisy']
         assert pc_noisy_batch.ndim == 3
         
-        # 定义 4 个视角的 Y 轴旋转角度：0°, 90°, 180°, 270° (弧度制)
-        angles = [0.0, np.pi/2, np.pi, 3*np.pi/2]
+        # 保留 2 视角 TTA (兼顾高分与提速)
+        angles = [0.0, np.pi]
         
         res = []
         for i, pc_noisy in enumerate(pc_noisy_batch):
-            tta_preds = [] # 用于收集 4 个视角的去噪结果
+            tta_preds = [] 
             
             for angle in angles:
-                # 1. 构建 Y 轴旋转矩阵
                 cosval = np.cos(angle)
                 sinval = np.sin(angle)
                 rot_matrix = jt.array([
@@ -212,10 +211,9 @@ class VelocityModule(ModelSpec):
                     [-sinval, 0, cosval]
                 ]).float32()
                 
-                # 2. 旋转输入的带噪点云
                 rotated_pc = jt.matmul(pc_noisy, rot_matrix)
                 
-                # --- 开始常规的去噪推理流程 ---
+                # 重新呼叫我们优化过的高速 patch 去噪
                 pc_next = rotated_pc
                 for it in range(self.predict_iterations):
                     pc_next = patch_based_denoise(
@@ -232,27 +230,15 @@ class VelocityModule(ModelSpec):
                     if pc_next is None:
                         pc_next = rotated_pc
                         break
-                    if self.predict_postprocess:
-                        pc_next = edge_aware_smooth(
-                            pc_next,
-                            k=self.postprocess_k,
-                            strength=self.postprocess_strength,
-                            sigma=self.postprocess_sigma,
-                        )
-                # --- 推理结束 ---
                 
-                # 3. 将去噪后的点云“反向旋转”回原来的坐标系
-                # 旋转矩阵的转置（transpose）就是它的逆矩阵
                 inv_rot_matrix = rot_matrix.transpose(0, 1)
                 aligned_pc_denoised = jt.matmul(pc_next, inv_rot_matrix)
                 
                 tta_preds.append(aligned_pc_denoised)
             
-            # 4. TTA 终极融合：将 4 个视角的坐标直接求平均！
-            # 这能极大消除单次预测的方差和边界伪影
+            # TTA 融合
             final_pc_denoised = jt.stack(tta_preds, dim=0).mean(dim=0)
             
-            # 转换为 numpy 格式保存
             pc_denoised_np = final_pc_denoised.detach().numpy()
             res.append({"pc_denoised": pc_denoised_np})
             
@@ -342,8 +328,7 @@ def patch_based_denoise(
     num_patches = int(seed_k * N / patch_size)
     pcl_noisy = pcl_noisy.unsqueeze(0)  # (1, N, 3)
     
-    # ⚡ 提速点 2: 抛弃极慢的 Python 版 FPS！
-    # 在 Patch 级别，纯随机采样的覆盖率足够高，速度是 FPS 的 1000 倍，且对最终精度无影响。
+    # ⚡ 纯随机 FPS (极大提速)
     seed_idx = jt.randperm(N)[:num_patches]
     seed_pnts = pcl_noisy[:, seed_idx, :]
     
@@ -379,26 +364,19 @@ def patch_based_denoise(
     patches_denoised = jt.concat(patches_denoised, dim=0)
     patches_denoised = patches_denoised + seed_expand
     
-    # ⚡ 提速点 3: 纯 GPU 张量聚合 (彻底消灭 for 循环和 .item())
-    # 将原来的 argmax 硬截断，升级为更高级的“加权平均 (Weighted Average)”。
-    # 这不仅能让 GPU 并行起飞，还能消除 Patch 拼接处的边界伪影，提升 Chamfer 评分！
+    # ⚡ 纯 GPU 张量聚合 (不拉回 CPU)
+    flat_idx = point_idxs.reshape(-1)
+    flat_pts = patches_denoised.reshape(-1, 3)
     
-    flat_idx = point_idxs.reshape(-1)           # (P*M,)
-    flat_pts = patches_denoised.reshape(-1, 3)  # (P*M, 3)
-    
-    # 距离归一化并计算权重
     patch_dists = patch_dists / (patch_dists[:, -1:].broadcast(patch_dists.shape) + 1e-8)
-    weights = jt.exp(-patch_dists).reshape(-1, 1) # (P*M, 1)
+    weights = jt.exp(-patch_dists).reshape(-1, 1)
     
-    weighted_pts = flat_pts * weights           # (P*M, 3)
+    weighted_pts = flat_pts * weights
     
-    # 使用 scatter_ 并行累加坐标和权重
     out_pts = jt.zeros((N, 3)).scatter_(0, flat_idx.unsqueeze(1).broadcast(weighted_pts.shape), weighted_pts, reduce='add')
     out_weights = jt.zeros((N, 1)).scatter_(0, flat_idx.unsqueeze(1), weights, reduce='add')
     
-    # 除以总权重得到最终平滑点云
     pcl_out = out_pts / (out_weights + 1e-8)
-    
     return pcl_out
 
 def edge_aware_smooth(pcl, k=16, strength=0.1, sigma=0.05):
