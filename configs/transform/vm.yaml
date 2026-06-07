@@ -40,4 +40,8 @@ validate_transform: &validate_transform
       num_patches: 1
       train_cvm_network: False
 
-predict_transform: *validate_transform
+# 之前的写法：predict_transform: *validate_transform
+# 修改为下面这样，让预测阶段不执行任何多余的增强和归一化：
+
+predict_transform:
+  augments: []

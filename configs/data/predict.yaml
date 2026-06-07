@@ -12,3 +12,4 @@ predict_dataset:
       shapenet: [
         [./datalist/test.txt, 1.0],
       ]
+
