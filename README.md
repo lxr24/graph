@@ -79,4 +79,4 @@ python evaluate.py \
     --mesh_dir ./dataset_train \
     --workers 8
 ```
-注意：`--pred_dir` 必须指向包含 `shapenet/<synset_id>/<model_id>/denoised.npy` 的目录层级，否则会出现“缺失预测按 0 分”。
+注意：`--pred_dir` 必须指向包含 `shapenet/<synset_id>/<model_id>/denoised.npy` 的目录层级，否则会出现“缺失预测记为 0 分”。

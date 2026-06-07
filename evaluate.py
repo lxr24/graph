@@ -277,7 +277,7 @@ def main():
         print(f"  pred_dir: {len(pred_samples)} 个, gt_dir: {len(gt_samples)} 个, noisy_dir: {len(noisy_samples)} 个")
         print(f"  pred 示例: {_preview_keys(pred_samples)}")
         print(f"  gt 示例:   {_preview_keys(gt_samples)}")
-        print(f"  noisy 示例:{_preview_keys(noisy_samples)}")
+        print(f"  noisy 示例: {_preview_keys(noisy_samples)}")
         print("  请检查 --pred_dir 是否正好指向包含 shapenet/.../denoised.npy 的那一层目录。")
         sys.exit(1)
 
