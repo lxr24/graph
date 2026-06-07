@@ -222,7 +222,11 @@ class PCDataset(Dataset):
                     check(k1)
                     values = [processed_batch[i]['cat'][k1] for i in range(batch_len)]
                     if all(isinstance(x, ndarray) for x in values):
-                        tensors_cat[k1] = jt.array(np.concatenate(values, axis=1))
+                        if all(x.ndim >= 2 for x in values):
+                            tensors_cat[k1] = jt.array(np.concatenate(values, axis=1))
+                        else:
+                            cat_vals = [jt.array(x) for x in values]
+                            tensors_cat[k1] = jt.concat(cat_vals, dim=1)
                     else:
                         cat_vals = []
                         for v1 in values:
@@ -257,12 +261,9 @@ class PCDataset(Dataset):
                         stack_vals.append(v1)
                     tensors_stack[k] = jt.stack(stack_vals)
         
-        collated_stack = tensors_stack
-        collated_cat = tensors_cat
-        
         collated_batch = {
-            **collated_stack,
-            **collated_cat,
+            **tensors_stack,
+            **tensors_cat,
             **non_tensors,
         }
         return collated_batch
