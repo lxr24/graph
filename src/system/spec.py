@@ -1,10 +1,12 @@
 from collections import defaultdict
+from copy import deepcopy
 from jittor import optim
 from typing import Dict, List, Optional
 from tqdm import tqdm
 
 import jittor as jt
 import os
+import numpy as np
 
 from ..data.asset import Asset
 from ..data.dataset import PCDatasetModule
@@ -58,11 +60,29 @@ class DummySystem():
         if trainer_config is None:
             trainer_config = {}
         self.epochs = trainer_config.get('epochs', 1)
+        self.grad_accum_steps = max(1, trainer_config.get('grad_accum_steps', 1))
+        self.grad_clip_norm = trainer_config.get('grad_clip_norm', None)
+        self.ema_decay = trainer_config.get('ema_decay', None)
+        self.lr_scheduler = trainer_config.get('lr_scheduler', None)
+        self.warmup_epochs = trainer_config.get('warmup_epochs', 0)
+        amp_level = trainer_config.get('amp_level', None)
+        if amp_level is not None:
+            try:
+                jt.flags.auto_mixed_precision_level = amp_level
+            except Exception:
+                print("\033[31mWARNING: AMP not supported in this environment\033[0m")
         
         if optimizer_config is not None and model is not None:
             self.optimizer = get_optimizer(optimizer_config, model)
+            self.base_lr = optimizer_config.get('lr', None)
         else:
             self.optimizer = None
+            self.base_lr = None
+        
+        if self.ema_decay is not None and model is not None:
+            self.ema_model = deepcopy(model)
+        else:
+            self.ema_model = None
         
         self._validation_loss = defaultdict(list)
     
@@ -94,6 +114,56 @@ class DummySystem():
         if not isinstance(loss_sum, jt.Var):
             return jt.array(loss_sum)
         return loss_sum
+
+    def _update_lr(self, epoch: int):
+        if self.optimizer is None or self.base_lr is None or self.lr_scheduler is None:
+            return
+        scheduler = self.lr_scheduler
+        target = scheduler.get('__target__', 'cosine')
+        if target == 'step':
+            step_size = scheduler.get('step_size', 10)
+            gamma = scheduler.get('gamma', 0.5)
+            lr = self.base_lr * (gamma ** (epoch // step_size))
+        elif target == 'linear':
+            min_lr = scheduler.get('min_lr', 0.0)
+            lr = self.base_lr - (self.base_lr - min_lr) * epoch / max(1, self.epochs - 1)
+        else:
+            min_lr = scheduler.get('min_lr', 0.0)
+            lr = min_lr + 0.5 * (self.base_lr - min_lr) * (1 + np.cos(np.pi * epoch / max(1, self.epochs)))
+        if self.warmup_epochs > 0 and epoch < self.warmup_epochs:
+            lr = lr * float(epoch + 1) / float(self.warmup_epochs)
+        try:
+            self.optimizer.lr = lr
+        except Exception:
+            pass
+
+    def _clip_grad_norm(self):
+        if self.grad_clip_norm is None or self.model is None:
+            return
+        total_norm = 0.0
+        for p in self.model.parameters():
+            if p.grad is None:
+                continue
+            param_norm = jt.sqrt((p.grad ** 2).sum())
+            total_norm += (param_norm ** 2)
+        total_norm = jt.sqrt(total_norm + 1e-6)
+        clip_coef = self.grad_clip_norm / (total_norm + 1e-6)
+        if clip_coef < 1:
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    p.grad = p.grad * clip_coef
+
+    def _update_ema(self):
+        if self.ema_model is None or self.ema_decay is None:
+            return
+        for ema_p, p in zip(self.ema_model.parameters(), self.model.parameters()):
+            try:
+                ema_p.assign(ema_p * self.ema_decay + p * (1 - self.ema_decay))
+            except Exception:
+                try:
+                    ema_p.update(ema_p * self.ema_decay + p * (1 - self.ema_decay))
+                except Exception:
+                    pass
     
     def on_train_epoch_start(self):
         pass
@@ -149,19 +219,34 @@ class DummySystem():
         self.model.set_predict(False)
         for epoch in range(self.epochs):
             self.model.train()
+            self._update_lr(epoch)
             self.on_train_epoch_start()
             train_dataloader = self.dataset_module.train_dataloader()
             assert train_dataloader is not None, "train_dataloader is None"
             pbar = tqdm(train_dataloader, total=len(train_dataloader)//train_dataloader.batch_size) # type: ignore
+            accum = 0
+            self.optimizer.zero_grad()
             for batch in pbar:
                 self.on_train_batch_start()
                 loss = self.training_step(batch)
-                self.optimizer.zero_grad()
+                loss = loss / self.grad_accum_steps
                 self.optimizer.backward(loss)
-                pbar.set_description(f"Epoch {epoch}, Loss: {_get_item(loss)}")
+                accum += 1
+                display_loss = _get_item(loss) * self.grad_accum_steps
+                pbar.set_description(f"Epoch {epoch}, Loss: {display_loss}")
+                if accum % self.grad_accum_steps == 0:
+                    self._clip_grad_norm()
+                    self.on_before_optimizer_step(self.optimizer)
+                    self.optimizer.step()
+                    self._update_ema()
+                    self.optimizer.zero_grad()
+                self.on_train_batch_end()
+            if accum % self.grad_accum_steps != 0:
+                self._clip_grad_norm()
                 self.on_before_optimizer_step(self.optimizer)
                 self.optimizer.step()
-                self.on_train_batch_end()
+                self._update_ema()
+                self.optimizer.zero_grad()
             self.on_train_epoch_end()
             
             self.model.eval()
@@ -189,8 +274,37 @@ class DummySystem():
             os.makedirs(self.ckpt_save_dir, exist_ok=True)
             self.model.save(checkpoint_path)
     
+    def validate(self):
+        self.model.set_predict(False)
+        self.model.eval()
+        validate_dataloader = self.dataset_module.validate_dataloader()
+        if validate_dataloader is None:
+            print("\033[31mNo validation dataloader found\033[0m")
+            return
+        self.on_validation_epoch_start()
+        if isinstance(validate_dataloader, dict):
+            for name, dataloader in validate_dataloader.items():
+                pbar = tqdm(dataloader, total=len(dataloader)//dataloader.batch_size)
+                for batch in pbar:
+                    self.on_validation_batch_start()
+                    loss = self.validation_step(batch)
+                    pbar.set_description(f"Validate {name}, Loss: {_get_item(loss)}")
+                    self.on_validation_batch_end()
+        else:
+            pbar = tqdm(validate_dataloader, total=len(validate_dataloader)//validate_dataloader.batch_size)
+            for batch in pbar:
+                self.on_validation_batch_start()
+                loss = self.validation_step(batch)
+                pbar.set_description(f"Validate, Loss: {_get_item(loss)}")
+                self.on_validation_batch_end()
+        self.on_validation_epoch_end()
+
     def predict(self):
         # only iterate once
+        model_backup = None
+        if self.ema_model is not None:
+            model_backup = self.model
+            self.model = self.ema_model
         self.model.set_predict(True)
         self.model.eval()
         self.on_predict_epoch_start()
@@ -205,4 +319,8 @@ class DummySystem():
                 output = self.predict_step(batch, batch_idx)
                 if self.writer is not None:
                     self.writer.write(batch, output, dataset_module=self.dataset_module)
+                self.on_predict_batch_end()
                 pbar.set_description(f"Predicting {dataloader_name}, Batch {batch_idx}")
+        self.on_predict_epoch_end()
+        if model_backup is not None:
+            self.model = model_backup

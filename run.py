@@ -136,5 +136,8 @@ if __name__ == "__main__":
     elif mode == 'predict':
         assert system is not None, "system is None, cannot predict"
         system.predict()
+    elif mode == 'validate':
+        assert system is not None, "system is None, cannot validate"
+        system.validate()
     else:
         assert 0

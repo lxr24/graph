@@ -45,6 +45,7 @@ class NpyLazyAsset(LazyAsset):
         asset = Asset(
             path=self.path,
             cls=self.cls,
+            sampled_vertices=pc,
             sampled_vertices_noisy=pc,
         )
         return asset

@@ -9,10 +9,21 @@ components:
 
 loss:
   loss: 1.0
+  chamfer: 0.1
+  p2plane: 0.05
+  structure: 0.05
 
 optimizer:
   __target__: adam
-  lr: 0.00001
+  lr: 0.0003
+  weight_decay: 0.000001
 
 trainer:
-  epochs: 100
+  epochs: 200
+  grad_accum_steps: 2
+  grad_clip_norm: 1.0
+  ema_decay: 0.999
+  warmup_epochs: 5
+  lr_scheduler:
+    __target__: cosine
+    min_lr: 0.000001

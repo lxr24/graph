@@ -19,6 +19,8 @@ class Asset():
     sampled_vertices: Optional[ndarray]=None
     
     sampled_vertices_noisy: Optional[ndarray]=None
+
+    sampled_normals: Optional[ndarray]=None
     
     meta: Optional[Dict]=None
     
@@ -26,9 +28,16 @@ class Asset():
         """trans: 4x4 affine matrix"""
         def _apply(v: ndarray, trans: ndarray) -> ndarray:
             return np.matmul(v, trans[:3, :3].transpose()) + trans[:3, 3]
+        def _apply_normal(n: ndarray, trans: ndarray) -> ndarray:
+            rot = trans[:3, :3]
+            n = np.matmul(n, rot.transpose())
+            norm = np.linalg.norm(n, axis=-1, keepdims=True) + 1e-12
+            return n / norm
         
         if self.vertices is not None:
             self.vertices = _apply(self.vertices, trans)
+        if self.sampled_normals is not None:
+            self.sampled_normals = _apply_normal(self.sampled_normals, trans)
 
 class Exporter(): # a simple parser
     
