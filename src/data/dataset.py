@@ -222,9 +222,9 @@ class PCDataset(Dataset):
                     check(k1)
                     values = [processed_batch[i]['cat'][k1] for i in range(batch_len)]
                     if all(isinstance(x, ndarray) for x in values):
-                        if all(x.ndim >= 2 for x in values):
+                        try:
                             tensors_cat[k1] = jt.array(np.concatenate(values, axis=1))
-                        else:
+                        except Exception:
                             cat_vals = [jt.array(x) for x in values]
                             tensors_cat[k1] = jt.concat(cat_vals, dim=1)
                     else:
@@ -250,7 +250,10 @@ class PCDataset(Dataset):
                 check(k)
                 values = [processed_batch[i][k] for i in range(batch_len)]
                 if all(isinstance(x, ndarray) for x in values):
-                    tensors_stack[k] = jt.array(np.stack(values, axis=0))
+                    try:
+                        tensors_stack[k] = jt.array(np.stack(values, axis=0))
+                    except Exception:
+                        tensors_stack[k] = jt.stack([jt.array(x) for x in values])
                 else:
                     stack_vals = []
                     for v1 in values:
