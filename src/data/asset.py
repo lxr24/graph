@@ -38,6 +38,11 @@ class Asset():
             self.vertices = _apply(self.vertices, trans)
         if self.sampled_normals is not None:
             self.sampled_normals = _apply_normal(self.sampled_normals, trans)
+        # 🚨 新增：确保真正的点云数据也被旋转和缩放！
+        if self.sampled_vertices is not None:
+            self.sampled_vertices = _apply(self.sampled_vertices, trans)
+        if self.sampled_vertices_noisy is not None:
+            self.sampled_vertices_noisy = _apply(self.sampled_vertices_noisy, trans)
 
 class Exporter(): # a simple parser
     
