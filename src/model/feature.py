@@ -50,30 +50,31 @@ class EdgeConv(nn.Module):
         else:
             raise Exception("Please assign valid activation to MLP!")
     
-    def execute(self, x, edge_index):
+    # 🚨 核心修改：抛弃 edge_index，直接接收 3D KNN 索引矩阵
+    def execute(self, x, knn_idx):
         """
-        x: (N, C)
-        edge_index: (2, E)
+        x: (B, N, C)
+        knn_idx: (B, N, k)
         """
-        src = edge_index[0]  # (E,)
-        dst = edge_index[1]  # (E,)
+        B, N, k = knn_idx.shape
         
-        # gather
-        x_i = x[dst]  # (E, C)
-        x_j = x[src]  # (E, C)
+        # 1. 获取中心点特征并扩展维度 -> (B, N, k, C)
+        x_i = x.unsqueeze(2).broadcast((B, N, k, x.shape[-1]))
         
-        # message
-        tmp = jt.concat([x_i, x_j - x_i], dim=1)  # (E, 2C)
-        msg = self.mlp(tmp)  # (E, out_channels)
+        # 2. 利用 Jittor 的高级索引，直接获取邻居特征 -> (B, N, k, C)
+        # 生成对应的 Batch 索引
+        batch_idx = jt.arange(B).reshape(B, 1, 1).broadcast((B, N, k))
+        x_j = x[batch_idx, knn_idx, :]
         
-        N = x.shape[0]
-        out = jt.full((N, msg.shape[1]), 0)
-        cnt = jt.full((N, msg.shape[1]), 0)
+        # 3. 拼接特征 -> (B, N, k, 2C)
+        tmp = jt.concat([x_i, x_j - x_i], dim=-1)
         
-        # scatter mean
-        out = out.scatter_(0, dst.unsqueeze(1).broadcast(msg.shape), msg, reduce='add')
-        cnt = cnt.scatter_(0, dst.unsqueeze(1).broadcast(msg.shape), jt.ones_like(msg), reduce='add')
-        out = out / (cnt + 1)
+        # 4. 密集矩阵直接通过 MLP -> (B, N, k, out_channels)
+        msg = self.mlp(tmp)
+        
+        # 5. 直接在 k 的维度上求平均，瞬间完成聚合，彻底消灭 scatter_！ -> (B, N, out_channels)
+        out = msg.mean(dim=2) 
+        
         out_2 = self.lin(x)
         return out + out_2
 
@@ -81,8 +82,8 @@ class DynamicEdgeConv(EdgeConv):
     def __init__(self, in_channels, out_channels, activation: Optional[str]='ReLU'):
         super().__init__(in_channels, out_channels, activation)
     
-    def execute(self, x, edge_index):
-        return super().execute(x, edge_index)
+    def execute(self, x, knn_idx):
+        return super().execute(x, knn_idx)
 
 class FeatureExtraction(nn.Module):
     def __init__(
@@ -122,32 +123,17 @@ class FeatureExtraction(nn.Module):
         if self.use_attention:
             self.attention = SelfAttention(embedding_dim, num_heads=attention_heads)
 
-    # ========= edge_index 构建 =========
-    def get_edge_index(self, x):
+    # ========= 取消复杂的 edge_index，直接返回 knn 索引 =========
+    def get_knn_idx_tensor(self, x):
         # x: (B, N, C)
-        B, N, _ = x.shape
+        # 注意：这里继续使用我们上一步优化过的高速 get_knn_idx 函数！
         knn_idx = get_knn_idx(x, x, self.k + 1)  # (B, N, k+1)
-        knn_idx = knn_idx[:, :, 1:]
-        base = jt.arange(B) * N  # (B,)
-        base = base.reshape(B, 1, 1)
-        
-        knn_idx = knn_idx + base  # (B, N, k)
-        
-        dst = jt.arange(N)
-        dst = dst.reshape(1, N, 1).broadcast((B, N, self.k))
-        dst = dst + base
-        
-        src = knn_idx.reshape(-1)
-        dst = dst.reshape(-1)
-        
-        edge_index = jt.stack([src, dst], dim=0)  # (2, E)
-        
-        return edge_index
+        return knn_idx[:, :, 1:]  # (B, N, k)
     
     def normalize_patch(self, pcl):
         scale = jt.sqrt((pcl ** 2).sum(-1, keepdims=True))
         scale = scale.max(dim=-2, keepdims=True)
-        return pcl / (scale + 1e-8) # type: ignore
+        return pcl / (scale + 1e-8)
     
     def execute(self, x):
         # x: (B, N, C)
@@ -159,22 +145,30 @@ class FeatureExtraction(nn.Module):
         features = []
         x_in = x
         for conv in self.convs:
-            edge_index = self.get_edge_index(x_in)
-            x_flat = x_in.reshape(B * N, -1)
-            x_out = conv(x_flat, edge_index)
-            x_out = x_out.reshape(B, N, -1)
+            # 直接获取 (B, N, k) 形状的索引
+            knn_idx = self.get_knn_idx_tensor(x_in)
+            
+            # 🚨 核心修改：不再拍平 x_in！直接传入 3D 张量
+            x_out = conv(x_in, knn_idx)  # 输出自然是 (B, N, out_channels)
+            
             if self.use_residual and x_out.shape[-1] == x_in.shape[-1]:
                 x_out = x_out + x_in
             features.append(x_out)
             x_in = x_out
+            
         x_cat = jt.concat(features, dim=-1)
+        
+        # 只有在送入最终的 fuse 线性层时，才需要 reshape
         x_fused = self.fuse(x_cat.reshape(B * N, -1)).reshape(B, N, -1)
+        
         if self.use_global:
             global_feat = jt.concat([jt.max(x_fused, dim=1), jt.mean(x_fused, dim=1)], dim=-1)
             global_feat = global_feat.unsqueeze(1).broadcast((B, N, global_feat.shape[-1]))
             x_fused = self.global_proj(jt.concat([x_fused, global_feat], dim=-1))
+            
         if self.use_attention:
             x_fused = x_fused + self.attention(x_fused)
+            
         return x_fused
 
 class Decoder(nn.Module):
@@ -228,8 +222,20 @@ def get_knn_idx(x, y, k, offset=0):
     """
     K = k + offset
     if x.shape[-1] == 3:
+        # If dimension is exactly 3, Jittor has a native CUDA op for this
         _, idx = jt.misc.knn(x, y, K)
     else:
-        dist = ((x.unsqueeze(2) - y.unsqueeze(1)) ** 2).sum(-1)
+        # Optimized distance computation: (x-y)^2 = x^2 - 2xy + y^2
+        x2 = (x ** 2).sum(dim=-1, keepdims=True)         # (B, N, 1)
+        y2 = (y ** 2).sum(dim=-1, keepdims=True)         # (B, M, 1)
+        xy = jt.matmul(x, y.transpose(1, 2))             # (B, N, M)
+        
+        # Calculate distance
+        dist = x2 - 2 * xy + y2.transpose(1, 2)          # (B, N, M)
+        
+        # Optional: clamp to avoid negative values due to floating point inaccuracies
+        dist = jt.maximum(dist, jt.zeros_like(dist)) 
+        
         _, idx = jt.topk(dist, k=K, dim=-1, largest=False)
+        
     return idx[:, :, offset:]

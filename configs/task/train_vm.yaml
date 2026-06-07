@@ -27,3 +27,4 @@ trainer:
   lr_scheduler:
     __target__: cosine
     min_lr: 0.000001
+  amp_level: 1  # <-- ENABLE AUTOMATIC MIXED PRECISION
