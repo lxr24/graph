@@ -138,20 +138,12 @@ class DummySystem():
             pass
 
     def _clip_grad_norm(self):
-        if self.grad_clip_norm is None or self.model is None:
+        # 确保配置了裁剪阈值且优化器存在
+        if self.grad_clip_norm is None or self.optimizer is None:
             return
-        total_norm = 0.0
-        for p in self.model.parameters():
-            if p.grad is None:
-                continue
-            param_norm = jt.sqrt((p.grad ** 2).sum())
-            total_norm += (param_norm ** 2)
-        total_norm = jt.sqrt(total_norm + 1e-6)
-        clip_coef = self.grad_clip_norm / (total_norm + 1e-6)
-        if clip_coef < 1:
-            for p in self.model.parameters():
-                if p.grad is not None:
-                    p.grad = p.grad * clip_coef
+            
+        # 直接调用 Jittor 原生接口进行梯度裁剪
+        self.optimizer.clip_grad_norm(self.grad_clip_norm)
 
     def _update_ema(self):
         if self.ema_model is None or self.ema_decay is None:
