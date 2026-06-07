@@ -1,6 +1,6 @@
 mode: predict
 debug: False
-load_ckpt: experiments/vm/checkpoint_99.pkl
+load_ckpt: experiments/vm/checkpoint_best.pkl
 
 components:
   data: predict

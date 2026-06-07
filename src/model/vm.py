@@ -72,6 +72,7 @@ class VelocityModule(ModelSpec):
         self.predict_patch_size = cfg.get('predict_patch_size', 1000)
         self.predict_seed_k = cfg.get('predict_seed_k', 6)
         self.predict_seed_k_alpha = cfg.get('predict_seed_k_alpha', 1)
+        self.predict_seed_strategy = cfg.get('predict_seed_strategy', 'farthest')
         self.postprocess_k = cfg.get('postprocess_k', 16)
         self.postprocess_strength = cfg.get('postprocess_strength', 0.1)
         self.postprocess_sigma = cfg.get('postprocess_sigma', 0.05)
@@ -222,6 +223,7 @@ class VelocityModule(ModelSpec):
                         patch_size=self.predict_patch_size,
                         seed_k=self.predict_seed_k,
                         seed_k_alpha=self.predict_seed_k_alpha,
+                        seed_strategy=self.predict_seed_strategy,
                         num_steps=self.predict_num_steps,
                         step_size=self.predict_step_size,
                         step_schedule=self.predict_step_schedule,
@@ -317,6 +319,7 @@ def patch_based_denoise(
     patch_size=1000,
     seed_k=6,
     seed_k_alpha=1,
+    seed_strategy="farthest",
     num_steps: int=2,
     step_size: float=1.0,
     step_schedule: str="linear",
@@ -325,11 +328,15 @@ def patch_based_denoise(
     assert len(pcl_noisy.shape) == 2
     
     N, d = pcl_noisy.shape
-    num_patches = int(seed_k * N / patch_size)
+    num_patches = max(1, int(seed_k * N / patch_size))
+    pcl_noisy_orig = pcl_noisy
     pcl_noisy = pcl_noisy.unsqueeze(0)  # (1, N, 3)
     
-    # ⚡ 纯随机 FPS (极大提速)
-    seed_idx = jt.randperm(N)[:num_patches]
+    if seed_strategy == "farthest":
+        _, fps_idx = farthest_point_sampling(pcl_noisy, num_patches)
+        seed_idx = fps_idx[0]
+    else:
+        seed_idx = jt.randperm(N)[:num_patches]
     seed_pnts = pcl_noisy[:, seed_idx, :]
     
     patch_dists, point_idxs, patches = knn_points(seed_pnts, pcl_noisy, patch_size)
@@ -338,7 +345,7 @@ def patch_based_denoise(
     patch_dists = patch_dists[0]      # (P, M)
     point_idxs = point_idxs[0]        # (P, M)
     
-    seed_expand = seed_pnts.squeeze().unsqueeze(1).broadcast(patches.shape)
+    seed_expand = seed_pnts[0].unsqueeze(1).broadcast(patches.shape)
     patches = patches - seed_expand
     
     patches_denoised = []
@@ -377,6 +384,8 @@ def patch_based_denoise(
     out_weights = jt.zeros((N, 1)).scatter_(0, flat_idx.unsqueeze(1), weights, reduce='add')
     
     pcl_out = out_pts / (out_weights + 1e-8)
+    uncovered = (out_weights <= 1e-8).broadcast(pcl_out.shape)
+    pcl_out = jt.where(uncovered, pcl_noisy_orig, pcl_out)
     return pcl_out
 
 def edge_aware_smooth(pcl, k=16, strength=0.1, sigma=0.05):
