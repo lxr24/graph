@@ -205,6 +205,7 @@ class PCDataset(Dataset):
     def _collate_fn(self, batch):
         processed_batch = self.process_fn(batch) # type: ignore
         processed_batch: List[Dict]
+        batch_len = len(processed_batch)
         
         tensors_stack = {}
         tensors_cat = {}
@@ -219,45 +220,53 @@ class PCDataset(Dataset):
                 assert isinstance(v, dict)
                 for k1 in v.keys():
                     check(k1)
-                    tensors_cat[k1] = []
-                    for i in range(len(processed_batch)):
-                        v1 = processed_batch[i]['cat'][k1]
-                        if isinstance(v1, ndarray):
-                            v1 = jt.array(v1)
-                        elif isinstance(v1, jt.Var):
-                            v1 = v1
-                        else:
-                            raise ValueError(f"cannot concatenate non-tensor type of key {k1}, type: {type(v1)}")
-                        tensors_cat[k1].append(v1)
+                    values = [processed_batch[i]['cat'][k1] for i in range(batch_len)]
+                    if all(isinstance(x, ndarray) for x in values):
+                        try:
+                            tensors_cat[k1] = jt.array(np.concatenate(values, axis=1))
+                        except (ValueError, TypeError):
+                            cat_vals = [jt.array(x) for x in values]
+                            tensors_cat[k1] = jt.concat(cat_vals, dim=1)
+                    else:
+                        cat_vals = []
+                        for v1 in values:
+                            if isinstance(v1, ndarray):
+                                v1 = jt.array(v1)
+                            elif not isinstance(v1, jt.Var):
+                                raise ValueError(f"cannot concatenate non-tensor type of key {k1}, type: {type(v1)}")
+                            cat_vals.append(v1)
+                        tensors_cat[k1] = jt.concat(cat_vals, dim=1)
             elif k == "non":
                 assert isinstance(v, dict)
                 for k1 in v.keys():
                     check(k1)
                     non_tensors[k1] = []
-                    for i in range(len(processed_batch)):
+                    for i in range(batch_len):
                         v1 = processed_batch[i]['non'][k1]
                         if isinstance(v1, ndarray):
                             v1 = jt.array(v1)
                         non_tensors[k1].append(v1)
             else:
                 check(k)
-                tensors_stack[k] = []
-                for i in range(len(processed_batch)):
-                    v1 = processed_batch[i][k]
-                    if isinstance(v1, ndarray):
-                        v1 = jt.array(v1)
-                    elif isinstance(v1, jt.Var):
-                        v1 = v1
-                    else:
-                        raise ValueError(f"cannot stack type of key {k}, type: {type(v1)}")
-                    tensors_stack[k].append(v1)
-        
-        collated_stack = {k: jt.stack(v) for k, v in tensors_stack.items()}
-        collated_cat = {k: jt.concat(v, dim=1) for k, v in tensors_cat.items()}
+                values = [processed_batch[i][k] for i in range(batch_len)]
+                if all(isinstance(x, ndarray) for x in values):
+                    try:
+                        tensors_stack[k] = jt.array(np.stack(values, axis=0))
+                    except (ValueError, TypeError):
+                        tensors_stack[k] = jt.stack([jt.array(x) for x in values])
+                else:
+                    stack_vals = []
+                    for v1 in values:
+                        if isinstance(v1, ndarray):
+                            v1 = jt.array(v1)
+                        elif not isinstance(v1, jt.Var):
+                            raise ValueError(f"cannot stack type of key {k}, type: {type(v1)}")
+                        stack_vals.append(v1)
+                    tensors_stack[k] = jt.stack(stack_vals)
         
         collated_batch = {
-            **collated_stack,
-            **collated_cat,
+            **tensors_stack,
+            **tensors_cat,
             **non_tensors,
         }
         return collated_batch
