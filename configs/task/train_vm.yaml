@@ -1,4 +1,4 @@
-mode: train
+mode: validate
 debug: False
 
 components:
@@ -20,7 +20,7 @@ optimizer:
   weight_decay: 0.000001
 
 trainer:
-  epochs: 100
+  epochs: 50
   grad_accum_steps: 2
   grad_clip_norm: 1.0
   ema_decay: 0.999
